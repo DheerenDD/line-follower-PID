@@ -7,60 +7,82 @@ Servo rightServo;
 #define RIGHT_PIN  12
 #define LEFT_STOP  1507
 #define RIGHT_STOP 1507
-#define BASE_SPEED 50
 
-#define SENSOR_PIN A0
+#define LEFT_SENSOR_PIN  A0    // swap with A1 if you rearranged the sensors
+#define RIGHT_SENSOR_PIN A1
 
-#define BLACK_VALUE 900
-#define WHITE_VALUE 100
-#define TARGET      450
+#define ON_LINE_THRESH 550     // > this = on black line; < this = on white
 
-float Kp = 0.30;
-float Ki = 0.002;
-float Kd = 0.20;
+#define BASE_SPEED  50         // forward speed (lowered to reduce overshoot)
+#define TURN_BIAS   8          // baseline ellipse curve
+#define TURN_DIV    75         // bigger = gentler proportional turn
+#define TURN_CAP    15         // max proportional turn (soft states)
+#define PIVOT_HARD  22         // opposite-wheel pivot for full-loss recovery
 
-float lastError = 0;
-unsigned long lastTime = 0;
+int lastDir = 1;               // last recovery direction (+1 = steer right)
+
 unsigned long lastPrintTime = 0;
-
 #define PRINT_INTERVAL_MS 100
 
 void setup() {
   Serial.begin(9600);
-
   leftServo.attach(LEFT_PIN);
   rightServo.attach(RIGHT_PIN);
-
   leftServo.writeMicroseconds(LEFT_STOP);
   rightServo.writeMicroseconds(RIGHT_STOP);
-
   delay(3000);
-  lastTime = millis();
 }
 
-int fastRead() {
-  return analogRead(SENSOR_PIN);
-  delayMicroseconds(50);   // let it settle
-  return analogRead(SENSOR_PIN);  // real read
+int readSensor(int pin) {
+  analogRead(pin);
+  delayMicroseconds(50);
+  return analogRead(pin);
 }
 
 void loop() {
-  int val = fastRead();
+  int left  = readSensor(LEFT_SENSOR_PIN);
+  int right = readSensor(RIGHT_SENSOR_PIN);
 
-  float error = (float)(val - TARGET);
+  bool leftBlack  = (left  > ON_LINE_THRESH);
+  bool rightBlack = (right > ON_LINE_THRESH);
 
-  unsigned long now = millis();
-  float dt = (now - lastTime) / 1000.0;
-  if (dt <= 0) dt = 0.001;
+  int leftSpeed, rightSpeed;
+  const char* state;
 
-  float derivative = (error - lastError) / dt;
-  float correction = (Kp * error) + (Kd * derivative);
-
-  lastError = error;
-  lastTime  = now;
-
-  int leftSpeed  = BASE_SPEED + (int)(correction * 0.2);
-  int rightSpeed = BASE_SPEED - (int)(correction * 0.2);
+  if (leftBlack && !rightBlack) {
+    // ON TARGET: left rides the line, right on white. Track with proportional trim.
+    int error = left - right;                 // how far onto the line we are
+    int turn  = error / TURN_DIV;
+    turn = constrain(turn, -TURN_CAP, TURN_CAP);
+    leftSpeed  = BASE_SPEED + TURN_BIAS - turn;
+    rightSpeed = BASE_SPEED - TURN_BIAS + turn;
+    state = "TRACK";
+  }
+  else if (!leftBlack && !rightBlack) {
+    // Both white: line slipped off left sensor toward the right. Steer RIGHT (soft).
+    int turn = (ON_LINE_THRESH - min(left, right)) / TURN_DIV;
+    turn = constrain(turn, 0, TURN_CAP);
+    leftSpeed  = BASE_SPEED + turn;
+    rightSpeed = BASE_SPEED - turn;
+    lastDir = 1;
+    state = "white->R";
+  }
+  else if (leftBlack && rightBlack) {
+    // Both black: drifted right, line under both. Steer LEFT (soft).
+    int turn = (min(left, right) - ON_LINE_THRESH) / TURN_DIV;
+    turn = constrain(turn, 0, TURN_CAP);
+    leftSpeed  = BASE_SPEED - turn;
+    rightSpeed = BASE_SPEED + turn;
+    lastDir = -1;
+    state = "black->L";
+  }
+  else {
+    // Right black, left white: line crossed fully over. Hard pivot LEFT to recover.
+    leftSpeed  =  0;
+    rightSpeed =  PIVOT_HARD;
+    lastDir = -1;
+    state = "R-only->L-hard";
+  }
 
   leftSpeed  = constrain(leftSpeed,  -150, 150);
   rightSpeed = constrain(rightSpeed, -150, 150);
@@ -68,11 +90,12 @@ void loop() {
   leftServo.writeMicroseconds(LEFT_STOP  - leftSpeed);
   rightServo.writeMicroseconds(RIGHT_STOP + rightSpeed);
 
+  unsigned long now = millis();
   if (now - lastPrintTime >= PRINT_INTERVAL_MS) {
     lastPrintTime = now;
-    Serial.println("Val:"); Serial.print(val);
-    Serial.print(" Err:"); Serial.print(error);
-    Serial.print(" Cor:"); Serial.print(correction);
+    Serial.print("L:");   Serial.print(left);
+    Serial.print(" R:");  Serial.print(right);
+    Serial.print(" ");    Serial.print(state);
     Serial.print(" Ls:"); Serial.print(leftSpeed);
     Serial.print(" Rs:"); Serial.println(rightSpeed);
   }
