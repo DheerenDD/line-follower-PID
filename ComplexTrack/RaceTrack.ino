@@ -5,24 +5,25 @@ Servo rightServo;
 
 #define LEFT_PIN   13
 #define RIGHT_PIN  12
-#define LEFT_STOP  1507
-#define RIGHT_STOP 1507
+#define LEFT_STOP  1507        // servo-specific neutral pulse (calibrated)
+#define RIGHT_STOP 1507        // servo-specific neutral pulse (calibrated)
 
 #define LEFT_SENSOR_PIN  A0    // swap with A1 if you rearranged the sensors
 #define RIGHT_SENSOR_PIN A1
 
 #define ON_LINE_THRESH 550     // > this = on black line; < this = on white
 
-#define BASE_SPEED  5         // lowered: hairpins need time to turn
-#define TURN_DIV    30         // lower = more responsive than the ellipse build
-#define TURN_CAP    55         // raised = more authority on tight curves
+// Tuning for the irregular course: slow and responsive so tight hairpins can
+// be tracked without overshooting.
+#define BASE_SPEED  5          // lowered: hairpins need time to turn
+#define TURN_DIV    30         // proportional divisor; lower = more responsive
+#define TURN_CAP    55         // correction limit; raised = authority on tight curves
 #define PIVOT_HARD  40         // recovery pivot strength
 
-int lastDir = 1;               // +1 = line was last seen toward the RIGHT
-                               // -1 = line was last seen toward the LEFT
-
+int lastDir = 1;               // last side the line was seen on:
+                               // +1 = toward RIGHT sensor, -1 = toward LEFT
 unsigned long lastPrintTime = 0;
-#define PRINT_INTERVAL_MS 100
+#define PRINT_INTERVAL_MS 100  // throttle Serial so prints don't slow the loop
 
 void setup() {
   Serial.begin(9600);
@@ -30,15 +31,20 @@ void setup() {
   rightServo.attach(RIGHT_PIN);
   leftServo.writeMicroseconds(LEFT_STOP);
   rightServo.writeMicroseconds(RIGHT_STOP);
-  delay(3000);
+  delay(3000);                 // pause to position the robot at the start
 }
 
+// Dummy read + settle delay before the real read for a stable ADC value.
 int readSensor(int pin) {
   analogRead(pin);
   delayMicroseconds(50);
   return analogRead(pin);
 }
 
+// Single-sensor edge-following with a four-state controller. The active
+// sensor rides the line edge; the difference between the two readings sets a
+// proportional steering correction. lastDir remembers which way the line went
+// so the robot can hunt back toward it when both sensors lose the line.
 void loop() {
   int left  = readSensor(LEFT_SENSOR_PIN);
   int right = readSensor(RIGHT_SENSOR_PIN);
@@ -50,7 +56,7 @@ void loop() {
   const char* state;
 
   if (leftBlack && !rightBlack) {
-    // ON TARGET: left sensor rides the line, right on white.
+    // ON TARGET: left sensor rides the line, right on white. Steer proportionally.
     int turn = constrain((left - right) / TURN_DIV, -TURN_CAP, TURN_CAP);
     leftSpeed  = BASE_SPEED - turn;
     rightSpeed = BASE_SPEED + turn;
@@ -82,9 +88,11 @@ void loop() {
   leftSpeed  = constrain(leftSpeed,  -150, 150);
   rightSpeed = constrain(rightSpeed, -150, 150);
 
+  // Mirrored servo mounting: LEFT minus, RIGHT plus so equal speeds go straight.
   leftServo.writeMicroseconds(LEFT_STOP  - leftSpeed);
   rightServo.writeMicroseconds(RIGHT_STOP + rightSpeed);
 
+  // Throttled debug output.
   unsigned long now = millis();
   if (now - lastPrintTime >= PRINT_INTERVAL_MS) {
     lastPrintTime = now;
