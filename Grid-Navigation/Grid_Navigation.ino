@@ -9,6 +9,7 @@ Servo rightServo;
 #define START_Y       0
 #define START_HEADING 0        // 0=North(+Y), 1=East(+X), 2=South(-Y), 3=West(-X)
 
+// Target waypoints in grid coordinates; visited in order.
 int waypoints[][2] = {
   {3, 2},
   {5, 5},
@@ -20,26 +21,27 @@ const int numWaypoints = sizeof(waypoints) / sizeof(waypoints[0]);
 
 #define LEFT_PIN   13
 #define RIGHT_PIN  12
-#define LEFT_STOP  1507
-#define RIGHT_STOP 1507
+#define LEFT_STOP  1507        // servo-specific neutral pulse (calibrated)
+#define RIGHT_STOP 1507        // servo-specific neutral pulse (calibrated)
 
-#define LEFT_SENSOR_PIN  A0
+#define LEFT_SENSOR_PIN  A0    // IR reflectance sensors on analog outputs
 #define RIGHT_SENSOR_PIN A1
 
-#define ON_LINE_THRESH 550
+#define ON_LINE_THRESH 550     // reading above this = black line detected
 
 // ==================== TUNING ====================
 
-#define BASE_SPEED      15
-#define TURN_DIV        90
-#define TURN_CAP        18
+#define BASE_SPEED      15     // forward speed offset from neutral
+
+#define TURN_DIV        90     // (reserved) proportional steering divisor
+#define TURN_CAP        18     // (reserved) steering correction limit
 
 #define PIVOT_SPEED          30
 #define TURN_TIME_RIGHT_MS  2000   // calibrated 90-degree RIGHT turn from rest
 #define TURN_TIME_LEFT_MS   1650   // calibrated 90-degree LEFT turn from rest
-#define TURN_SETTLE_MS       500
-#define NUDGE_TIME_MS        1500
-#define CROSS_BLANK_MS       400
+#define TURN_SETTLE_MS       500   // pause before a pivot to kill momentum
+#define NUDGE_TIME_MS        1500  // creep past a crossing to align turning axis
+#define CROSS_BLANK_MS       400   // debounce: ignore repeat crossings within this
 
 #define SPIN_SPEED      30
 #define SPIN_TIME_MS    8000
@@ -50,7 +52,7 @@ int curX = START_X;
 int curY = START_Y;
 int heading = START_HEADING;
 
-bool prevAnyBlack = false;
+bool prevAnyBlack = false;             // previous crossing state (for edge detect)
 unsigned long lastCrossTime = 0;
 
 const char* dirName(int h) {
@@ -65,12 +67,15 @@ const char* dirName(int h) {
 
 // ==================== LOW LEVEL ====================
 
+// Dummy read + settle delay before the real read for a stable ADC value.
 int readSensor(int pin) {
   analogRead(pin);
   delayMicroseconds(50);
   return analogRead(pin);
 }
 
+// Mirrored servo mounting: LEFT uses minus, RIGHT uses plus so that equal
+// speeds drive the robot straight instead of spinning in place.
 void drive(int leftSpeed, int rightSpeed) {
   leftSpeed  = constrain(leftSpeed,  -150, 150);
   rightSpeed = constrain(rightSpeed, -150, 150);
@@ -84,16 +89,17 @@ void stopMotors() {
 }
 
 // ==================== LINE FOLLOWING ====================
-// The robot drives straight throughout; alignment is handled by placement.
-// A crossing (either sensor black) does not steer, so it cannot deviate at
-// an intersection.
+// The robot drives straight between intersections; alignment is handled by
+// physical placement rather than active steering, so a crossing cannot pull
+// the robot off course.
 
 void followLineStep(int left, int right) {
   drive(BASE_SPEED, BASE_SPEED);
 }
 
-// Intersection = rising edge of EITHER sensor going black.
-// Covers interior crossings (both black) and edge crossings (one black).
+// Intersection = rising edge of EITHER sensor going black. Using "either"
+// (not "both") also catches edge crossings where only the inner sensor sees
+// the perpendicular line. Debounced by CROSS_BLANK_MS.
 bool crossedIntersection(int left, int right) {
   bool anyBlack = (left > ON_LINE_THRESH) || (right > ON_LINE_THRESH);
   bool rising = anyBlack && !prevAnyBlack;
@@ -107,6 +113,8 @@ bool crossedIntersection(int left, int right) {
 
 // ==================== MOVEMENT PRIMITIVES ====================
 
+// Drive forward one grid cell: advance until the next intersection, nudge the
+// turning axis onto it, stop, then update the tracked coordinate.
 void driveOneCell() {
   prevAnyBlack = false;
   lastCrossTime = millis();
@@ -137,11 +145,12 @@ void driveOneCell() {
   Serial.print(")  heading "); Serial.println(dirName(heading));
 }
 
-// Timed 90-degree pivot from rest. dir = +1 right, -1 left.
-// Right and left use separately calibrated times.
+// Timed open-loop 90-degree pivot from rest. dir = +1 right, -1 left.
+// Left and right use separately calibrated durations because the two servos
+// are not perfectly matched.
 void turn90(int dir) {
   stopMotors();
-  delay(TURN_SETTLE_MS);                 // kill forward momentum first
+  delay(TURN_SETTLE_MS);                 // settle so momentum doesn't overshoot
 
   int turnTime = (dir > 0) ? TURN_TIME_RIGHT_MS : TURN_TIME_LEFT_MS;
 
@@ -154,6 +163,7 @@ void turn90(int dir) {
   heading = (heading + (dir > 0 ? 1 : 3)) % 4;
 }
 
+// Rotate to face a target heading using the shortest turn.
 void faceHeading(int target) {
   int diff = (target - heading + 4) % 4;
   if (diff == 1)      turn90(+1);
@@ -165,6 +175,7 @@ void faceHeading(int target) {
 
 // ==================== NAVIGATION ====================
 
+// Manhattan path planning: resolve the X displacement first, then Y.
 void goToWaypoint(int tx, int ty) {
   int dx = tx - curX;
   if (dx != 0) {
@@ -180,6 +191,8 @@ void goToWaypoint(int tx, int ty) {
 
 // ==================== ROUTE PREVIEW ====================
 
+// Print the full intersection-by-intersection route before driving, so the
+// planned path can be verified against the physical grid.
 void printFullRoute() {
   int px = START_X, py = START_Y;
 
@@ -211,6 +224,7 @@ void printFullRoute() {
   Serial.println();
 }
 
+// Spin in place to signal the route is complete.
 void spinFinish() {
   drive(SPIN_SPEED, -SPIN_SPEED);
   delay(SPIN_TIME_MS);
@@ -240,7 +254,7 @@ void setup() {
 
   printFullRoute();
 
-  delay(3000);
+  delay(3000);   // pause so the robot can be positioned at the start
 
   for (int w = 0; w < numWaypoints; w++) {
     Serial.print("Heading to waypoint "); Serial.print(w + 1);
@@ -267,5 +281,5 @@ void setup() {
 }
 
 void loop() {
-  // Route runs once in setup().
+  // Entire route runs once in setup(); nothing repeats.
 }
