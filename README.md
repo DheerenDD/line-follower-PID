@@ -1,98 +1,75 @@
-# Two-Sensor Line Following Robot
+# Elliptical Path Following (PID)
 
-An Arduino-based robot that follows a line around an elliptical track using two
-reflectance sensors and two continuous-rotation servos. Steering is handled by a
-state machine that tracks one edge of the line and scales its corrections to how
-far off-course the robot is.
+Arduino sketch for the elliptical-path challenge: a two-wheeled robot follows a
+black elliptical line on a white surface using two IR reflectance sensors and a
+PID-trimmed edge-following controller.
+
+## Approach
+
+The robot edge-follows the line: one sensor rides the line edge while the other
+stays on white. Two ideas are combined:
+
+- **Constant curve bias (`TURN_BIAS`)** — holds the base elliptical arc so the
+  robot keeps curving along the path.
+- **PID correction** — trims deviation from the line edge on top of that arc.
+
+The PID acts only on the edge-tracking error (how far the active sensor is onto
+the line), not on the whole path, so the ellipse is preserved while small
+deviations are corrected smoothly.
+
+A four-state controller handles every sensor combination:
+
+| Sensors | State | Action |
+|---|---|---|
+| Left black, right white | TRACK | PID trim, line toward the left |
+| Right black, left white | R-TRACK | PID trim, mirrored |
+| Both black | BOTH | On the line; ease forward with base bias |
+| Both white | RECOVER | Line lost; reset PID and hard-pivot toward last-seen side |
 
 ## Hardware
 
-- Arduino (Uno or compatible)
-- 2 × reflectance sensor modules (analog output), read on pins `A0` (left) and `A1` (right)
-- 2 × continuous-rotation servos on pins `13` (left) and `12` (right)
-- Chassis with two driven wheels
-- Power supply for the servos
+- Arduino Uno / Nano
+- Parallax Board of Education (BOE) Shield
+- Two Parallax continuous-rotation servos (left on pin 13, right on pin 12)
+- Two FlyingFish MH-series IR reflectance sensors on analog outputs (A0, A1)
+- Battery pack powering the servos through the shield
 
-The two sensors are mounted at the front of the robot, side by side, facing down
-at the track. A dark line runs on a light background.
+## Key Parameters
 
-## Wiring
+- `LEFT_STOP`, `RIGHT_STOP` — calibrated neutral pulse for each servo.
+- `ON_LINE_THRESH` — analog reading above which a sensor is over black.
+- `BASE_SPEED` — forward speed.
+- `TURN_BIAS` — constant bias that sets the base elliptical curve.
+- `KP`, `KI`, `KD` — PID gains for the edge-tracking correction.
+- `TURN_CAP` — limit on the PID steering output.
+- `I_CAP` — anti-windup clamp on the integral term.
+- `PIVOT_HARD` — pivot strength used to recover when the line is lost.
 
-| Component      | Arduino pin |
-|----------------|-------------|
-| Left sensor    | A0          |
-| Right sensor   | A1          |
-| Left servo     | 13          |
-| Right servo    | 12          |
+## Tuning the PID
 
-Each sensor's signal wire must go to the **analog output (AO)** pin on the module,
-not the digital output (DO). The DO pin only reports a hard on/off value and the
-onboard trimpot sets its threshold; the AO pin gives the continuous reading this
-code relies on.
+Tune on the actual track, in this order:
 
-## How it works
+1. Set `KI` and `KD` to 0. Raise `KP` until the robot tracks the line but
+   begins to oscillate.
+2. Add `KD` to damp the oscillation.
+3. Add a small `KI` only if a persistent offset remains; otherwise leave it 0.
 
-Each sensor reads high (~980) over the black line and low (~110) over the white
-background. A threshold of 550 classifies each sensor as on-line or off-line.
+Retune if the surface, lighting, or speed changes.
 
-The robot follows the **left edge** of the line: the target state is the left
-sensor on the line and the right sensor on white. Every loop it reads both
-sensors and picks one of four states:
+## Design Notes
 
-- **Left black, right white** — on target. Drive forward, trimming proportionally
-  to stay on the edge.
-- **Both white** — line has slipped off to the right. Steer right, gently.
-- **Both black** — drifted right onto the line. Steer left, gently.
-- **Right black, left white** — line has crossed fully over. Hard pivot left to
-  recover.
+- **Derivative guard:** the D term uses a measured timestep `dt` with a guard
+  (`if (dt <= 0) dt = 0.001`) so it cannot spike when the loop runs very fast.
+- **Anti-windup:** the integral is clamped to `I_CAP` and reset whenever the
+  line is lost, so stale error does not accumulate.
+- **Mirrored servos:** the two servos face opposite ways, so the left command
+  subtracts speed and the right adds it; equal speeds then drive straight.
+- **Stable ADC reads:** each sensor is read with a dummy read plus a short
+  settle delay before the value is taken.
+- **Throttled Serial:** debug output is limited to one line every
+  `PRINT_INTERVAL_MS` so printing does not slow the control loop.
 
-Corrections in the first three states scale with how far off the line is, so a
-small drift produces a small turn and a large one a bigger turn. Only the full-loss
-recovery state uses a fixed hard pivot.
+## Serial Output
 
-## Calibration and tuning
-
-All tuning values are `#define` constants at the top of the sketch.
-
-| Constant         | Purpose                                                        |
-|------------------|----------------------------------------------------------------|
-| `ON_LINE_THRESH` | Reading above this = on the black line (default 550)           |
-| `BASE_SPEED`     | Forward speed when tracking                                    |
-| `TURN_BIAS`      | Constant curve to match the ellipse; flip sign to curve the other way |
-| `TURN_DIV`       | Larger = gentler proportional turn                             |
-| `TURN_CAP`       | Ceiling on the soft-state turn amount                          |
-| `PIVOT_HARD`     | Turn strength for the full-loss recovery pivot                 |
-| `LEFT_STOP` / `RIGHT_STOP` | Servo stop-pulse values (µs) where each servo sits still |
-
-Tuning guide:
-
-- Turning too hard when a sensor fires → raise `TURN_DIV`, lower `TURN_CAP`.
-- Wandering and reacting late → lower `TURN_DIV`.
-- Losing the tight ends of the ellipse → raise `PIVOT_HARD`.
-- Curving the wrong way around the loop → flip the sign of `TURN_BIAS`.
-
-The `LEFT_STOP` and `RIGHT_STOP` values are specific to your servos. Find them by
-sending pulse widths until each servo sits completely still, then set the constants
-to those numbers.
-
-## Running it
-
-1. Set `LEFT_STOP` and `RIGHT_STOP` to your calibrated stop values.
-2. Confirm sensor signal wires are on the AO pins.
-3. Upload the sketch.
-4. Bench-test with the wheels off the ground and watch the Serial Monitor: slide
-   the line under each sensor and confirm the printed state and wheel speeds change
-   as expected.
-5. Place the robot with the left sensor on the line and the right on white, aimed
-   along the line, and let it go.
-
-The Serial output prints both sensor readings, the current state, and the two wheel
-speeds each loop, which is the main tool for diagnosing misbehaviour.
-
-## Notes
-
-- The Serial prints slow the loop slightly; comment them out for best tracking once
-  the robot is running well.
-- If the robot handles one side of the loop well but struggles on the other, the
-  followed edge (left) may be the harder one for that direction — mirroring the
-  logic to follow the right edge can help.
+At 9600 baud, the sketch prints the sensor readings, current state, last-seen
+direction, and the two wheel speeds, for tuning and diagnosis.
